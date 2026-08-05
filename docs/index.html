@@ -74,18 +74,50 @@
   let keys = {};
   window.addEventListener('keydown', e => { keys[e.code] = true; });
   window.addEventListener('keyup',   e => { keys[e.code] = false; });
-  const toLocal = e => {
+  const toLocalX = e => {
     const r = canvas.getBoundingClientRect();
     return (e.clientX - r.left) * (W / r.width);
   };
-  canvas.addEventListener('mousemove', e => { mouseX = toLocal(e); });
-  canvas.addEventListener('touchmove', e => {
-    e.preventDefault();
-    if (e.touches[0]) mouseX = toLocal(e.touches[0]);
-  }, {passive:false});
+  const toLocalTouchX = e => {
+    const r = canvas.getBoundingClientRect();
+    const t = e.touches[0];
+    return (t.clientX - r.left) * (W / r.width);
+  };
+
+  // shared "tap / click" action: start, advance level, or launch the serve ball.
+  // Called directly from both mouse and touch, so mobile doesn't rely on the
+  // click event that preventDefault() on touchstart would otherwise suppress.
+  function doTap(){
+    if (state.phase === 'ready'){ startGame(); }
+    else if (state.phase === 'won'){ nextLevel(); }
+    else if (state.phase === 'over'){ resetAll(); }
+    else if (state.phase === 'serve'){
+      balls.forEach(b => { if (b.stuck) launchBall(b); });
+      state.phase = 'play';
+    }
+  }
+
+  window.addEventListener('keydown', e => {
+    if (e.code === 'Space'){
+      if (state.phase === 'ready'){ startGame(); }
+      else if (state.phase === 'won'){ nextLevel(); }
+      else if (state.phase === 'over'){ resetAll(); }
+      else if (state.phase === 'serve'){ balls.forEach(b => { if (b.stuck) launchBall(b); }); state.phase='play'; }
+    }
+  });
+
+  canvas.addEventListener('mousemove', e => { mouseX = toLocalX(e); });
+  canvas.addEventListener('mousedown', e => { doTap(); });
+
+  // touch-first controls: finger position drives the paddle, tap fires doTap.
   canvas.addEventListener('touchstart', e => {
     e.preventDefault();
-    if (e.touches[0]) mouseX = toLocal(e.touches[0]);
+    if (e.touches[0]) mouseX = toLocalTouchX(e);
+    doTap();
+  }, {passive:false});
+  canvas.addEventListener('touchmove', e => {
+    e.preventDefault();
+    if (e.touches[0]) mouseX = toLocalTouchX(e);
   }, {passive:false});
 
   // ---------- Game state ----------
@@ -301,25 +333,6 @@
     state.phase = 'play';
   }
   function resetAll(){ startGame(); }
-
-  // ---------- Input hooks for phase transitions ----------
-  window.addEventListener('keydown', e => {
-    if (e.code === 'Space'){
-      if (state.phase === 'ready'){ startGame(); }
-      else if (state.phase === 'won'){ nextLevel(); }
-      else if (state.phase === 'over'){ resetAll(); }
-      else if (state.phase === 'serve'){ balls.forEach(b => { if (b.stuck) launchBall(b); }); state.phase='play'; }
-    }
-  });
-  canvas.addEventListener('mousedown', e => {
-    if (state.phase === 'ready'){ startGame(); }
-    else if (state.phase === 'won'){ nextLevel(); }
-    else if (state.phase === 'over'){ resetAll(); }
-    else if (state.phase === 'serve'){
-      balls.forEach(b => { if (b.stuck) launchBall(b); });
-      state.phase = 'play';
-    }
-  });
 
   // ---------- Render ----------
   function render(){
