@@ -82,6 +82,7 @@
   let autoMode = true;           // IDLE GAME: an AI paddle plays the whole thing for you
   let autoTimer = 0;             // autopilot phase-timer (seconds)
   let lastBrickBreak = Date.now(); // stall detector for autopilot cascade priming
+  let breached = false;          // true once the wall's slit brick is broken (allow in-chamber pumping)
 
   // ---------- Input ----------
   let mouseX = W/2;
@@ -148,6 +149,8 @@
   function buildLevel(){
     cfg = LEVELS[(state.level-1) % LEVELS.length];     // cycle levels
     autoFloorY = ROW_Y(cfg.chamber);
+    lastBrickBreak = Date.now();   // fresh stall timer so no spurious in-chamber pump at level start
+    breached = false;
     bricks = []; balls = []; pickups = [];
     const wallTop = cfg.chamber;
     const totalRows = wallTop + cfg.wall;
@@ -223,6 +226,7 @@
     else if (!b.target && p < 0.30) dropPickup(b, 'S'); // split
     else if (b.target && p < 0.22) dropPickup(b, 'S');  // shaft more likely to drop split
     else if (Math.random() < 0.04) dropPickup(b, 'L');  // extra life
+    if (b.target) breached = true;      // the slit is open — safe to pump balls into the chamber now
     if (!b.target){ state.chamberLeft--; if (state.chamberLeft <= 0) win(); }
     lastBrickBreak = Date.now();   // for autopilot stall detection
   }
@@ -277,7 +281,12 @@
     if (autoMode){ mouseX = aiPaddleX(); target = 0; }
     if (target !== 0) mouseX = paddle.x + target * 380 * dt;
     const maxX = W - paddle.w/2;
-    paddle.x += (mouseX - paddle.x) * Math.min(1, (autoMode?26:12)*dt);
+    // eased pursuit with a hard top-speed cap: converges smoothly, never teleports
+    const factor = (autoMode ? 7 : 9) * dt;
+    const desired = paddle.x + (mouseX - paddle.x) * Math.min(1, factor);
+    const maxStep = (autoMode ? 560 : 700) * dt;   // capped paddle speed (px/sec)
+    const px = desired - paddle.x;
+    paddle.x += Math.max(-maxStep, Math.min(maxStep, px));
     paddle.x = Math.max(paddle.w/2, Math.min(maxX, paddle.x));
 
     if (autoMode){
@@ -291,12 +300,17 @@
       else if (state.phase === 'won'){ if (autoTimer <= 0) nextLevel(); }
       else if (state.phase === 'over'){ if (autoTimer <= 0) resetAll(); }
 
-      // stall guard: keep a healthy multiball count so the cascade clears decisively
-      if (state.phase==='play' && balls.length > 0 && balls.length < 4 &&
-          Date.now() - lastBrickBreak > 2000){
+      // stall guard: once the wall is breached, keep a healthy multiball count so
+      // the cascade clears decisively. (Never pumps before the slit is open — so no
+      // ball mysteriously appears above the steel line at level start.)
+      const nearEnd = state.chamberLeft !== undefined && state.chamberLeft <= 5;
+      const maxBalls = nearEnd ? 6 : 4;
+      const thr = nearEnd ? 1200 : 2000;
+      if (state.phase==='play' && breached && balls.length > 0 && balls.length < maxBalls &&
+          Date.now() - lastBrickBreak > thr){
         // spawn a fresh ball right in the prize chamber so the cascade keeps rolling
-        balls.push({ x: GRID_X0 + (2+Math.random()*7)*BRICK_W, y: 50,
-                     vx: (Math.random()*6-3), vy: 3, speed:BALL_SPEED, stuck:false, _js:0 });
+        balls.push({ x: GRID_X0 + (2+Math.random()*7)*BRICK_W, y: 40,
+                     vx: (Math.random()*8-4), vy: 3.5, speed:BALL_SPEED, stuck:false, _js:0 });
         lastBrickBreak = Date.now();
       }
     } else {
