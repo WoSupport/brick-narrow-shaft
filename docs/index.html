@@ -61,7 +61,7 @@
   const BRICK_W = 48, BRICK_H = 20;
   const GRID_X0 = (W - COLS*BRICK_W)/2;      // 16
   const ROW_Y = r => 64 + r*22;               // row 0 top of board
-  const ROWS = 7;                             // 0..6
+  const ROWS = 6;                             // 0..5 (chamber 0-2, wall with shaft 3-5)
   const SHAFT_C = [4,5,6];                    // narrow breakable opening columns
   const PADDLE_Y = H - 46;
   const PADDLE_H = 14;
@@ -136,7 +136,7 @@
       for (let c=0; c<COLS; c++){
         const x = GRID_X0 + c*BRICK_W;
         const y = ROW_Y(r);
-        const isShaft = r===3 && SHAFT_C.includes(c);   // the narrow breakable DOOR in the steel roof
+        const isShaft = r>=3 && r<=5 && SHAFT_C.includes(c);  // narrow breakable shaft THROUGH the wall (the only way in)
         const isChamber = r<=2;
         const steel = !(isChamber || isShaft);
         const b = {
