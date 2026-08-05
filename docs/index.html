@@ -79,6 +79,9 @@
   ];
   let cfg = LEVELS[0];
   let autoFloorY = ROW_Y(cfg.chamber);   // top of the steel wall = "auto-play zone" boundary
+  let autoMode = true;           // IDLE GAME: an AI paddle plays the whole thing for you
+  let autoTimer = 0;             // autopilot phase-timer (seconds)
+  let lastBrickBreak = Date.now(); // stall detector for autopilot cascade priming
 
   // ---------- Input ----------
   let mouseX = W/2;
@@ -99,6 +102,7 @@
   // Called directly from both mouse and touch, so mobile doesn't rely on the
   // click event that preventDefault() on touchstart would otherwise suppress.
   function doTap(){
+    if (autoMode) return;            // idle mode: the autopilot owns the phases
     if (state.phase === 'ready'){ startGame(); }
     else if (state.phase === 'won'){ nextLevel(); }
     else if (state.phase === 'over'){ resetAll(); }
@@ -109,6 +113,7 @@
   }
 
   window.addEventListener('keydown', e => {
+    if (autoMode) return;
     if (e.code === 'Space'){
       if (state.phase === 'ready'){ startGame(); }
       else if (state.phase === 'won'){ nextLevel(); }
@@ -176,11 +181,12 @@
     balls = [];
     serve ? state.phase='serve' : state.phase='serve';
     paddle.x = W/2;
-    // preserve broken bricks; just respawn a single ball
-    balls.push({ x: W/2, y: PADDLE_Y - 16, vx:0, vy:0, speed:BALL_SPEED, stuck:true });
+    autoTimer = 0.85;      // autopilot beat before launching
+    balls.push({ x: W/2, y: PADDLE_Y - 16, vx:0, vy:0, speed:BALL_SPEED, stuck:true, _js:0 });
   }
 
   function launchBall(ball){
+    ball._js = (Math.random()-0.5)*26;   // slight per-rally aim variation => natural play
     const angle = -Math.PI/2 + (Math.random()*0.5 - 0.25);
     ball.vx = Math.cos(angle) * ball.speed;
     ball.vy = Math.sin(angle) * ball.speed;
@@ -202,6 +208,7 @@
     const clamp = Math.max(-1, Math.min(1, rel));
     const angle = clamp * (Math.PI/3);          // up to 60 deg either way
     ball.speed = Math.min(7.2, ball.speed + 0.08); // gentle ramp
+    ball._js = (Math.random()-0.5)*26;          // fresh aim bias each rally (autopilot)
     ball.vx = Math.sin(angle) * ball.speed;
     ball.vy = -Math.cos(angle) * ball.speed;
   }
@@ -217,6 +224,7 @@
     else if (b.target && p < 0.22) dropPickup(b, 'S');  // shaft more likely to drop split
     else if (Math.random() < 0.04) dropPickup(b, 'L');  // extra life
     if (!b.target){ state.chamberLeft--; if (state.chamberLeft <= 0) win(); }
+    lastBrickBreak = Date.now();   // for autopilot stall detection
   }
 
   function dropPickup(b, kind){
@@ -224,22 +232,87 @@
   }
 
   // ---------- Update ----------
+  // Autopilot: decides where the paddle should go so the game plays itself.
+  // Aims the ball up through the slot to breach the wall, then just tracks
+  // the ball to keep it alive and re-feed it through.
+  function aiPaddleX(){
+    if (!balls.length) return W/2;
+    let b = balls[0];
+    for (const x of balls) if (x.y > b.y) b = x;        // lowest ball = the one to catch/serve
+    if (b.stuck) return b.x;
+    if (b._js === undefined) b._js = 0;
+    const slitX = GRID_X0 + (cfg.shafts[0][Math.floor(cfg.shafts[0].length/2)] + 0.5)*BRICK_W + b._js;
+    const upTop = b.y < autoFloorY || b.vy <= 0;         // ball safe (in the chamber / rising)
+
+    if (upTop){
+      // ball is safe up top — chase a falling pickup to feed the multiball cascade
+      const value = {S:0, E:1, L:2};
+      let pk = null, pkR = Infinity;
+      for (const p of pickups){
+        if (p.y > PADDLE_Y - 190){
+          const r = (value[p.kind] ?? 3) + Math.abs(p.x - paddle.x) * 0.01;
+          if (r < pkR){ pk = p; pkR = r; }
+        }
+      }
+      return pk ? pk.x : b.x;
+    }
+
+    // ball is coming down in the field — aimed shot up the slot (catches it AND feeds it through)
+    const aimShot = b.vy > 0 && b.y > autoFloorY + 4 && b.y < PADDLE_Y - 30;
+    if (aimShot){
+      const entryY = ROW_Y(cfg.chamber) - 2;
+      const dx = Math.max(-320, Math.min(320, slitX - b.x));
+      const dy = Math.max(26, b.y - entryY);
+      const angle = Math.atan2(dx, dy);
+      let rel = angle / (Math.PI/3);
+      rel = Math.max(-1, Math.min(1, rel));
+      return Math.max(paddle.w/2, Math.min(W - paddle.w/2, b.x - rel*(paddle.w/2)));
+    }
+    return b.x;
+  }
+
   function update(dt){
-    // paddle movement
-    const target = keys['ArrowLeft']||keys['KeyA'] ? -1 : keys['ArrowRight']||keys['KeyD'] ? 1 : 0;
+    // paddle movement (autopilot drives it in idle mode)
+    let target = keys['ArrowLeft']||keys['KeyA'] ? -1 : keys['ArrowRight']||keys['KeyD'] ? 1 : 0;
+    if (autoMode){ mouseX = aiPaddleX(); target = 0; }
     if (target !== 0) mouseX = paddle.x + target * 380 * dt;
     const maxX = W - paddle.w/2;
-    paddle.x += (mouseX - paddle.x) * Math.min(1, 12*dt);
+    paddle.x += (mouseX - paddle.x) * Math.min(1, (autoMode?26:12)*dt);
     paddle.x = Math.max(paddle.w/2, Math.min(maxX, paddle.x));
 
-    // launch stuck ball on serve (Space key)
-    if (state.phase === 'serve'){
-      balls.forEach(b => { if (b.stuck){ b.x = paddle.x; b.y = PADDLE_Y - 16; } });
-      if (keys['Space']){
-        balls.forEach(b => { if (b.stuck) launchBall(b); });
-        state.phase = 'play';
+    if (autoMode){
+      // autopilot scheduler — advances phases on its own
+      autoTimer -= dt;
+      if (state.phase === 'ready'){ startGame(); }
+      else if (state.phase === 'serve'){
+        balls.forEach(b => { if (b.stuck){ b.x = paddle.x; b.y = PADDLE_Y - 16; } });
+        if (autoTimer <= 0){ balls.forEach(b => { if (b.stuck) launchBall(b); }); state.phase='play'; }
+      }
+      else if (state.phase === 'won'){ if (autoTimer <= 0) nextLevel(); }
+      else if (state.phase === 'over'){ if (autoTimer <= 0) resetAll(); }
+
+      // stall guard: if no brick has broken in a while, "pump" a split ball in so
+      // the multiball cascade always keeps rolling (this is what makes it a good idle show)
+      if (state.phase==='play' && balls.length > 0 && balls.length < 8 &&
+          Date.now() - lastBrickBreak > 3500){
+        // spawn a fresh ball right in the prize chamber so the cascade keeps rolling
+        balls.push({ x: GRID_X0 + (2+Math.random()*7)*BRICK_W, y: 50,
+                     vx: (Math.random()*6-3), vy: 3, speed:BALL_SPEED, stuck:false, _js:0 });
+        lastBrickBreak = Date.now();
+      }
+    } else {
+      // launch stuck ball on serve (Space key)
+      if (state.phase === 'serve'){
+        balls.forEach(b => { if (b.stuck){ b.x = paddle.x; b.y = PADDLE_Y - 16; } });
+        if (keys['Space']){
+          balls.forEach(b => { if (b.stuck) launchBall(b); });
+          state.phase = 'play';
+        }
       }
     }
+
+    // game-world simulation only while actively playing / serving
+    if (state.phase==='play' || state.phase==='serve'){
 
     // pickups
     for (let i=pickups.length-1; i>=0; i--){
@@ -311,6 +384,7 @@
       if (state.lives < 0) gameOver();
       else resetBall(false);
     }
+    }   // end play/serve gate
   }
 
   function applyPickup(kind){
@@ -330,11 +404,17 @@
   // ---------- Win / lose ----------
   function win(){
     state.phase = 'won';
-    hintEl.innerHTML = '<span class="badge">🏆 LEVEL CLEARED</span> — the cascade got them all! Press <b>Space</b> or <b>click</b> for the next fortress.';
+    if (autoMode) autoTimer = 2.4;   // let the "LEVEL CLEARED" card show before advancing
+    hintEl.innerHTML = autoMode
+      ? '<span class="badge">🏆 LEVEL CLEARED</span> — cascade complete, moving on…'
+      : '<span class="badge">🏆 LEVEL CLEARED</span> — the cascade got them all! Press <b>Space</b> or <b>click</b> for the next fortress.';
   }
   function gameOver(){
     state.phase = 'over';
-    hintEl.innerHTML = '<span class="badge">💥 GAME OVER</span> — the shaft won this time. Press <b>Space</b> or <b>click</b> to retry.';
+    if (autoMode) autoTimer = 2.6;
+    hintEl.innerHTML = autoMode
+      ? '<span class="badge">💥 LEVEL LOST</span> — restarting run…'
+      : '<span class="badge">💥 GAME OVER</span> — the shaft won this time. Press <b>Space</b> or <b>click</b> to retry.';
   }
   function nextLevel(){
     state.level++;
@@ -509,16 +589,18 @@
   function loop(now){
     const dt = Math.min(0.05, (now-last)/1000);
     last = now;
-    if (state.phase==='play' || state.phase==='serve') update(dt);
+    update(dt);          // always ran so the autopilot scheduler can advance phases on its own
     render();
     requestAnimationFrame(loop);
   }
 
   function init(){
-    hintEl.innerHTML =
-      '<b>Aim for the glowing shaft</b> — the only breakable gap in the steel wall. ' +
-      'Once the ball gets up top it self-sustains (auto-play). Grab <span class="badge" style="color:#ff5dff">⚡ split</span> ' +
-      'pickups for multiball chain reactions. Mouse / Arrow keys / touch to move.';
+    hintEl.innerHTML = autoMode
+      ? '🤖 <b>AUTOPILOT</b> — this is an idle game. The paddle plays itself: it threads the glowing slit, ' +
+        'then rides the auto-play cascade through every level. Nothing to do but watch. ⚡ split pickups cause multiball chain reactions.'
+      : '<b>Aim for the glowing shaft</b> — the only breakable gap in the steel wall. ' +
+        'Once the ball gets up top it self-sustains (auto-play). Grab <span class="badge" style="color:#ff5dff">⚡ split</span> ' +
+        'pickups for multiball chain reactions. Mouse / Arrow keys / touch to move.';
     buildLevel();
     state.phase = 'ready';
     requestAnimationFrame(loop);
