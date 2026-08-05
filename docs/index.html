@@ -71,18 +71,16 @@
   // wall    = rows of steel below the chamber, EXCEPT the given shaft columns which
   //           are breakable all the way through (the only way in)
   const LEVELS = [
-    { name:'The Slit',        chamber:3, wall:1, shafts:[[5]], hue:0 },   // one-brick gap, dead center
-    { name:'The Crank',       chamber:3, wall:1, shafts:[[7]], hue:1 },   // shifted right
-    { name:'Off-Center',      chamber:4, wall:1, shafts:[[4]], hue:3 },   // left, taller chamber
-    { name:'The Far Slot',    chamber:3, wall:1, shafts:[[8]], hue:5 },   // far right
-    { name:'The Deep Chamber',chamber:5, wall:1, shafts:[[6]], hue:2 },   // tall chamber
+    { name:'The Slit',        chamber:3, wall:1, shafts:[[5,6]], hue:0 },
+    { name:'The Crank',       chamber:3, wall:1, shafts:[[7,8]], hue:1 },
+    { name:'Off-Center',      chamber:4, wall:1, shafts:[[4,5]], hue:3 },
+    { name:'The Far Slot',    chamber:3, wall:1, shafts:[[8,9]], hue:5 },
+    { name:'The Deep Chamber',chamber:5, wall:1, shafts:[[6,7]], hue:2 },
   ];
   let cfg = LEVELS[0];
   let autoFloorY = ROW_Y(cfg.chamber);   // top of the steel wall = "auto-play zone" boundary
   let autoMode = true;           // IDLE GAME: an AI paddle plays the whole thing for you
   let autoTimer = 0;             // autopilot phase-timer (seconds)
-  let lastBrickBreak = Date.now(); // stall detector for autopilot cascade priming
-  let breached = false;          // true once the wall's slit brick is broken (allow in-chamber pumping)
 
   // ---------- Input ----------
   let mouseX = W/2;
@@ -149,8 +147,6 @@
   function buildLevel(){
     cfg = LEVELS[(state.level-1) % LEVELS.length];     // cycle levels
     autoFloorY = ROW_Y(cfg.chamber);
-    lastBrickBreak = Date.now();   // fresh stall timer so no spurious in-chamber pump at level start
-    breached = false;
     bricks = []; balls = []; pickups = [];
     const wallTop = cfg.chamber;
     const totalRows = wallTop + cfg.wall;
@@ -222,13 +218,11 @@
     state.score += b.target ? 30 : 10;
     // drop pickup
     const p = Math.random();
-    if (!b.target && p < 0.10) dropPickup(b, 'E');      // expand
-    else if (!b.target && p < 0.30) dropPickup(b, 'S'); // split
-    else if (b.target && p < 0.22) dropPickup(b, 'S');  // shaft more likely to drop split
-    else if (Math.random() < 0.04) dropPickup(b, 'L');  // extra life
-    if (b.target) breached = true;      // the slit is open — safe to pump balls into the chamber now
+    if (!b.target && p < 0.12) dropPickup(b, 'E');      // expand
+    else if (!b.target && p < 0.42) dropPickup(b, 'S'); // split
+    else if (b.target && p < 0.30) dropPickup(b, 'S');  // shaft more likely to drop split
+    else if (Math.random() < 0.05) dropPickup(b, 'L');  // extra life
     if (!b.target){ state.chamberLeft--; if (state.chamberLeft <= 0) win(); }
-    lastBrickBreak = Date.now();   // for autopilot stall detection
   }
 
   function dropPickup(b, kind){
@@ -242,36 +236,37 @@
   function aiPaddleX(){
     if (!balls.length) return W/2;
     let b = balls[0];
-    for (const x of balls) if (x.y > b.y) b = x;        // lowest ball = the one to catch/serve
+    for (const x of balls) if (x.y > b.y) b = x;        // lowest ball = the one in most danger
     if (b.stuck) return b.x;
     if (b._js === undefined) b._js = 0;
     const slitX = GRID_X0 + (cfg.shafts[0][Math.floor(cfg.shafts[0].length/2)] + 0.5)*BRICK_W + b._js;
-    const upTop = b.y < autoFloorY || b.vy <= 0;         // ball safe (in the chamber / rising)
+    const clampP = x => Math.max(paddle.w/2, Math.min(W - paddle.w/2, x));
 
-    if (upTop){
-      // ball is safe up top — chase a falling pickup to feed the multiball cascade
-      const value = {S:0, E:1, L:2};
-      let pk = null, pkR = Infinity;
-      for (const p of pickups){
-        if (p.y > PADDLE_Y - 190){
-          const r = (value[p.kind] ?? 3) + Math.abs(p.x - paddle.x) * 0.01;
-          if (r < pkR){ pk = p; pkR = r; }
-        }
-      }
-      return pk ? pk.x : b.x;
-    }
-
-    // ball is coming down in the field — aimed shot up the slot (catches it AND feeds it through)
-    const aimShot = b.vy > 0 && b.y > autoFloorY + 4 && b.y < PADDLE_Y - 30;
-    if (aimShot){
+    // aim the ball up through the slot (doubles as a catch — the reflected shot is upward)
+    const aimUp = () => {
       const entryY = ROW_Y(cfg.chamber) - 2;
       const dx = Math.max(-320, Math.min(320, slitX - b.x));
       const dy = Math.max(26, b.y - entryY);
       const angle = Math.atan2(dx, dy);
-      let rel = angle / (Math.PI/3);
-      rel = Math.max(-1, Math.min(1, rel));
-      return Math.max(paddle.w/2, Math.min(W - paddle.w/2, b.x - rel*(paddle.w/2)));
+      let rel = Math.max(-1, Math.min(1, angle/(Math.PI/3)));
+      return clampP(b.x - rel*(paddle.w/2));
+    };
+
+    // 1) if the lowest ball is near the paddle, DEFEND it (catch + feed it back up)
+    if (b.y > PADDLE_Y - 150) return aimUp();
+
+    // 2) ball is safe — catch a falling split/♥/◄► pickup so multiball builds
+    //    from a VISIBLE cause (paddle catching ⚡), never a hidden spawn.
+    let pk = null, pkR = Infinity;
+    for (const p of pickups){
+      const order = p.kind==='S' ? 0 : p.kind==='L' ? 1 : 2;
+      const r = order*1000 + Math.abs(p.x - paddle.x) + (PADDLE_Y - p.y)*0.5;
+      if (r < pkR){ pk = p; pkR = r; }
     }
+    if (pk) return clampP(pk.x);
+
+    // 3) otherwise keep feeding the ball up the slot to chip the chamber
+    if (b.vy > 0 && b.y > autoFloorY) return aimUp();
     return b.x;
   }
 
@@ -284,7 +279,7 @@
     // eased pursuit with a hard top-speed cap: converges smoothly, never teleports
     const factor = (autoMode ? 7 : 9) * dt;
     const desired = paddle.x + (mouseX - paddle.x) * Math.min(1, factor);
-    const maxStep = (autoMode ? 560 : 700) * dt;   // capped paddle speed (px/sec)
+    const maxStep = (autoMode ? 680 : 700) * dt;   // capped paddle speed (px/sec) — smooth, not teleporty
     const px = desired - paddle.x;
     paddle.x += Math.max(-maxStep, Math.min(maxStep, px));
     paddle.x = Math.max(paddle.w/2, Math.min(maxX, paddle.x));
@@ -299,24 +294,6 @@
       }
       else if (state.phase === 'won'){ if (autoTimer <= 0) nextLevel(); }
       else if (state.phase === 'over'){ if (autoTimer <= 0) resetAll(); }
-
-      // stall guard: once the wall is breached, keep a healthy multiball count so
-      // the cascade clears decisively. (Never pumps before the slit is open — so no
-      // ball mysteriously appears above the steel line at level start.)
-      const nearEnd = state.chamberLeft !== undefined && state.chamberLeft <= 5;
-      const maxBalls = nearEnd ? 6 : 4;
-      const thr = nearEnd ? 1200 : 2000;
-      if (state.phase==='play' && breached && balls.length > 0 && balls.length < maxBalls &&
-          Date.now() - lastBrickBreak > thr){
-        // restart the stalled cascade: the paddle "fires" an extra ball straight up
-        // through the now-open slit (never a ball materialising behind the steel)
-        const scx = GRID_X0 + (cfg.shafts[0][Math.floor(cfg.shafts[0].length/2)] + 0.5)*BRICK_W;
-        if (balls.length < 8){
-          balls.push({ x: scx, y: PADDLE_Y - 12, vx: 0, vy: -BALL_SPEED*1.1,
-                       speed: BALL_SPEED, stuck:false, _js:0 });
-          lastBrickBreak = Date.now();
-        }
-      }
     } else {
       // launch stuck ball on serve (Space key)
       if (state.phase === 'serve'){
@@ -445,7 +422,7 @@
     state.phase = 'play';
   }
   function startGame(){
-    state.level = 1; state.score = 0; state.lives = 3;
+    state.level = 1; state.score = 0; state.lives = autoMode ? 6 : 3;   // idle mode lives longer
     buildLevel();
     balls.forEach(b => { if (b.stuck) launchBall(b); });
     state.phase = 'play';
@@ -588,9 +565,8 @@
       ctx.fillText('Level ' + state.level + ' — ' + cfg.name, W/2, H/2-20);
       ctx.fillStyle='#c7d2ff'; ctx.font='15px sans-serif';
       const lines = [
-        'A one-brick-thick steel wall — the only way in is a single glowing slit.',
-        cfg.shafts[0].length<3 ? 'The gap is one brick wide: thread the ball dead-center.'
-                               : 'The shaft is the only opening — line up and break through.',
+        'A one-brick-thick steel wall — the only way in is a glowing slit.',
+        'The gap is two bricks wide — line it up and break through.',
         'Once the ball is inside, space opens up and it plays itself.',
         'Catch ⚡ split pickups for chain-reaction multiball clears.',
       ];
