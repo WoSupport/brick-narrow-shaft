@@ -291,10 +291,9 @@
       else if (state.phase === 'won'){ if (autoTimer <= 0) nextLevel(); }
       else if (state.phase === 'over'){ if (autoTimer <= 0) resetAll(); }
 
-      // stall guard: if no brick has broken in a while, "pump" a split ball in so
-      // the multiball cascade always keeps rolling (this is what makes it a good idle show)
-      if (state.phase==='play' && balls.length > 0 && balls.length < 8 &&
-          Date.now() - lastBrickBreak > 3500){
+      // stall guard: keep a healthy multiball count so the cascade clears decisively
+      if (state.phase==='play' && balls.length > 0 && balls.length < 4 &&
+          Date.now() - lastBrickBreak > 2000){
         // spawn a fresh ball right in the prize chamber so the cascade keeps rolling
         balls.push({ x: GRID_X0 + (2+Math.random()*7)*BRICK_W, y: 50,
                      vx: (Math.random()*6-3), vy: 3, speed:BALL_SPEED, stuck:false, _js:0 });
