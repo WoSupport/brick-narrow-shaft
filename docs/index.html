@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Breakout — The Narrow Shaft</title>
+<style>
+  html, body {
+    margin: 0; padding: 0;
+    height: 100%; width: 100%;
+    background: #0a0e1a;
+    color: #dfe6ff;
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    overflow: hidden;
+    touch-action: none;
+  }
+  #wrap {
+    position: fixed; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 10px;
+  }
+  canvas#game {
+    background: #0d1224;
+    border: 1px solid #2a3352;
+    border-radius: 8px;
+    box-shadow: 0 0 40px rgba(60,90,200,.25);
+    display: block;
+    max-width: 96vw;
+    max-height: 82vh;
+    cursor: none;
+    image-rendering: auto;
+  }
+  #hint {
+    font-size: 13px; color: #7f8bb8;
+    text-align: center; max-width: 620px; line-height: 1.5;
+  }
+  #hint b { color: #ffd75e; }
+  .badge {
+    display:inline-block; padding:2px 8px; border-radius:6px;
+    font-weight:700; font-size:12px; background:#1a2340;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="560" height="720"></canvas>
+  <div id="hint"></div>
+</div>
+
+<script>
+"use strict";
+(function(){
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const hintEl = document.getElementById('hint');
+  const W = canvas.width, H = canvas.height;
+
+  // ---------- Fixed layout ----------
+  const COLS = 11;
+  const BRICK_W = 48, BRICK_H = 20;
+  const GRID_X0 = (W - COLS*BRICK_W)/2;      // 16
+  const ROW_Y = r => 64 + r*22;               // row 0 top of board
+  const ROWS = 7;                             // 0..6
+  const SHAFT_C = [4,5,6];                    // narrow breakable opening columns
+  const PADDLE_Y = H - 46;
+  const PADDLE_H = 14;
+  const BALL_R = 7;
+  const CHAMBER_FLOOR_Y = ROW_Y(3);           // top of the steel wall = "auto-play zone" boundary
+  const BALL_SPEED = 5.6;
+
+  // ---------- Input ----------
+  let mouseX = W/2;
+  let keys = {};
+  window.addEventListener('keydown', e => { keys[e.code] = true; });
+  window.addEventListener('keyup',   e => { keys[e.code] = false; });
+  const toLocal = e => {
+    const r = canvas.getBoundingClientRect();
+    return (e.clientX - r.left) * (W / r.width);
+  };
+  canvas.addEventListener('mousemove', e => { mouseX = toLocal(e); });
+  canvas.addEventListener('touchmove', e => {
+    e.preventDefault();
+    if (e.touches[0]) mouseX = toLocal(e.touches[0]);
+  }, {passive:false});
+  canvas.addEventListener('touchstart', e => {
+    e.preventDefault();
+    if (e.touches[0]) mouseX = toLocal(e.touches[0]);
+  }, {passive:false});
+
+  // ---------- Game state ----------
+  const state = { phase:'ready', score:0, lives:3, level:1 };
+  let bricks = [];
+  let balls = [];
+  let pickups = [];
+  let paddle = { x: W/2, w: 92 };
+  let autoPlayStreak = 0;   // consecutive bounces up top
+  let ballBelowLong = 0;
+
+  function buildLevel(){
+    bricks = []; balls = []; pickups = [];
+    const totalBreakable = { count:0 };
+    for (let r=0; r<ROWS; r++){
+      for (let c=0; c<COLS; c++){
+        const x = GRID_X0 + c*BRICK_W;
+        const y = ROW_Y(r);
+        const isShaft = r===3 && SHAFT_C.includes(c);   // the narrow breakable DOOR in the steel roof
+        const isChamber = r<=2;
+        const steel = !(isChamber || isShaft);
+        const b = {
+          x, y, w:BRICK_W, h:BRICK_H,
+          c, r,
+          steel,
+          target: isShaft,       // the narrow breakable section (highlighted)
+          alive: true
+        };
+        if (!steel) totalBreakable.count++;
+        bricks.push(b);
+      }
+    }
+    state.totalBreakable = totalBreakable.count;
+    state.initialBreakable = totalBreakable.count;
+    resetBall(true);
+  }
+
+  function resetBall(serve){
+    balls = [];
+    serve ? state.phase='serve' : state.phase='serve';
+    paddle.x = W/2;
+    // preserve broken bricks; just respawn a single ball
+    balls.push({ x: W/2, y: PADDLE_Y - 16, vx:0, vy:0, speed:BALL_SPEED, stuck:true });
+  }
+
+  function launchBall(ball){
+    const angle = -Math.PI/2 + (Math.random()*0.5 - 0.25);
+    ball.vx = Math.cos(angle) * ball.speed;
+    ball.vy = Math.sin(angle) * ball.speed;
+    ball.stuck = false;
+  }
+
+  // ---------- Collision helpers ----------
+  function circleRect(cx, cy, cr, rx, ry, rw, rh){
+    const nx = Math.max(rx, Math.min(cx, rx+rw));
+    const ny = Math.max(ry, Math.min(cy, ry+rh));
+    const dx = cx-nx, dy = cy-ny;
+    if (dx*dx+dy*dy <= cr*cr) return { nx:nx-cx, ny:ny-cy, hit:true };
+    return { hit:false };
+  }
+
+  function paddleBounce(ball){
+    const p = paddle;
+    const rel = (ball.x - p.x) / (p.w/2);       // -1..1
+    const clamp = Math.max(-1, Math.min(1, rel));
+    const angle = clamp * (Math.PI/3);          // up to 60 deg either way
+    ball.speed = Math.min(7.2, ball.speed + 0.08); // gentle ramp
+    ball.vx = Math.sin(angle) * ball.speed;
+    ball.vy = -Math.cos(angle) * ball.speed;
+  }
+
+  function breakBrick(b, byBall){
+    if (!b.alive) return;
+    b.alive = false;
+    state.score += b.target ? 30 : 10;
+    // drop pickup
+    const p = Math.random();
+    if (!b.target && p < 0.10) dropPickup(b, 'E');      // expand
+    else if (!b.target && p < 0.30) dropPickup(b, 'S'); // split
+    else if (b.target && p < 0.22) dropPickup(b, 'S');  // shaft more likely to drop split
+    else if (Math.random() < 0.04) dropPickup(b, 'L');  // extra life
+    if (state.totalBreakable > 0) state.totalBreakable--;
+    if (state.totalBreakable <= 0) win();
+  }
+
+  function dropPickup(b, kind){
+    pickups.push({ x: b.x+b.w/2, y: b.y+b.h/2, kind, vy: 1.6 });
+  }
+
+  // ---------- Update ----------
+  function update(dt){
+    // paddle movement
+    const target = keys['ArrowLeft']||keys['KeyA'] ? -1 : keys['ArrowRight']||keys['KeyD'] ? 1 : 0;
+    if (target !== 0) mouseX = paddle.x + target * 380 * dt;
+    const maxX = W - paddle.w/2;
+    paddle.x += (mouseX - paddle.x) * Math.min(1, 12*dt);
+    paddle.x = Math.max(paddle.w/2, Math.min(maxX, paddle.x));
+
+    // launch stuck ball on serve (Space key)
+    if (state.phase === 'serve'){
+      balls.forEach(b => { if (b.stuck){ b.x = paddle.x; b.y = PADDLE_Y - 16; } });
+      if (keys['Space']){
+        balls.forEach(b => { if (b.stuck) launchBall(b); });
+        state.phase = 'play';
+      }
+    }
+
+    // pickups
+    for (let i=pickups.length-1; i>=0; i--){
+      const pk = pickups[i];
+      pk.y += pk.vy * dt * 60;
+      // catch with paddle
+      if (pk.y + 8 >= PADDLE_Y && pk.y - 8 <= PADDLE_Y+PADDLE_H &&
+          Math.abs(pk.x - paddle.x) < paddle.w/2 + 8){
+        applyPickup(pk.kind);
+        pickups.splice(i,1); continue;
+      }
+      if (pk.y > PADDLE_Y + 40) pickups.splice(i,1);
+    }
+
+    // balls
+    for (let i=balls.length-1; i>=0; i--){
+      const b = balls[i];
+      if (b.stuck) continue;
+
+      b.x += b.vx * dt * 60;
+      b.y += b.vy * dt * 60;
+
+      // walls
+      if (b.x - BALL_R < 0){ b.x = BALL_R; b.vx = Math.abs(b.vx); }
+      else if (b.x + BALL_R > W){ b.x = W - BALL_R; b.vx = -Math.abs(b.vx); }
+      if (b.y - BALL_R < 0){ b.y = BALL_R; b.vy = Math.abs(b.vy); autoPlayStreak++; }
+
+      // paddle
+      if (b.vy > 0 && b.y + BALL_R >= PADDLE_Y && b.y - BALL_R <= PADDLE_Y + PADDLE_H &&
+          b.x >= paddle.x - paddle.w/2 - BALL_R && b.x <= paddle.x + paddle.w/2 + BALL_R){
+        b.y = PADDLE_Y - BALL_R;
+        paddleBounce(b);
+        autoPlayStreak = Math.max(0, autoPlayStreak-1);
+      }
+
+      // bottom
+      if (b.y - BALL_R > H){
+        balls.splice(i,1);
+        continue;
+      }
+
+      // bricks
+      for (const bk of bricks){
+        if (!bk.alive) continue;
+        const hit = circleRect(b.x, b.y, BALL_R, bk.x, bk.y, bk.w, bk.h);
+        if (hit.hit){
+          // determine axis
+          const dx = b.x - (bk.x + bk.w/2);
+          const dy = b.y - (bk.y + bk.h/2);
+          if (Math.abs(dx/bk.w) > Math.abs(dy/bk.h)){
+            b.vx = dx > 0 ? Math.abs(b.vx) : -Math.abs(b.vx);
+          } else {
+            b.vy = dy > 0 ? Math.abs(b.vy) : -Math.abs(b.vy);
+          }
+          if (bk.steel){
+            state.score += 2;
+          } else {
+            breakBrick(bk, b);
+          }
+          // auto-play: bounces confined to chamber
+          if (b.y < CHAMBER_FLOOR_Y) autoPlayStreak++; else autoPlayStreak=0;
+        }
+      }
+    }
+
+    // lost all balls
+    if (balls.length === 0){
+      state.lives--;
+      if (state.lives < 0) gameOver();
+      else resetBall(false);
+    }
+  }
+
+  function applyPickup(kind){
+    if (kind === 'E') paddle.w = Math.min(150, paddle.w + 34);
+    else if (kind === 'L') state.lives++;
+    else if (kind === 'S'){
+      // split: add up to 2 new balls
+      for (let k=0; k<2 && balls.length < 8; k++){
+        const src = balls[0] || { x:W/2, y:PADDLE_Y-30, speed:BALL_SPEED };
+        let a = Math.random()*Math.PI*2;
+        balls.push({ x:src.x, y:src.y-10, vx:Math.cos(a)*BALL_SPEED,
+                     vy:-Math.abs(Math.sin(a))*BALL_SPEED, speed:BALL_SPEED, stuck:false });
+      }
+    }
+  }
+
+  // ---------- Win / lose ----------
+  function win(){
+    state.phase = 'won';
+    hintEl.innerHTML = '<span class="badge">🏆 LEVEL CLEARED</span> — the cascade got them all! Press <b>Space</b> or <b>click</b> for the next fortress.';
+  }
+  function gameOver(){
+    state.phase = 'over';
+    hintEl.innerHTML = '<span class="badge">💥 GAME OVER</span> — the shaft won this time. Press <b>Space</b> or <b>click</b> to retry.';
+  }
+  function nextLevel(){
+    state.level++;
+    buildLevel();          // phase -> serve
+    balls.forEach(b => { if (b.stuck) launchBall(b); });
+    state.phase = 'play';
+  }
+  function startGame(){
+    state.level = 1; state.score = 0; state.lives = 3;
+    buildLevel();
+    balls.forEach(b => { if (b.stuck) launchBall(b); });
+    state.phase = 'play';
+  }
+  function resetAll(){ startGame(); }
+
+  // ---------- Input hooks for phase transitions ----------
+  window.addEventListener('keydown', e => {
+    if (e.code === 'Space'){
+      if (state.phase === 'ready'){ startGame(); }
+      else if (state.phase === 'won'){ nextLevel(); }
+      else if (state.phase === 'over'){ resetAll(); }
+      else if (state.phase === 'serve'){ balls.forEach(b => { if (b.stuck) launchBall(b); }); state.phase='play'; }
+    }
+  });
+  canvas.addEventListener('mousedown', e => {
+    if (state.phase === 'ready'){ startGame(); }
+    else if (state.phase === 'won'){ nextLevel(); }
+    else if (state.phase === 'over'){ resetAll(); }
+    else if (state.phase === 'serve'){
+      balls.forEach(b => { if (b.stuck) launchBall(b); });
+      state.phase = 'play';
+    }
+  });
+
+  // ---------- Render ----------
+  function render(){
+    ctx.clearRect(0,0,W,H);
+
+    // board backdrop behind chamber
+    ctx.fillStyle = '#10162e';
+
+    // bricks
+    for (const b of bricks){
+      if (!b.alive) continue;
+      const g = b.target ? 1 : 0;
+      if (b.steel){
+        ctx.fillStyle = '#3a425e';
+        ctx.fillRect(b.x, b.y, b.w, b.h);
+        ctx.strokeStyle = '#565e82'; ctx.lineWidth=2; ctx.strokeRect(b.x+1, b.y+1, b.w-2, b.h-2);
+        // bolt
+        ctx.fillStyle = '#222841';
+        ctx.beginPath(); ctx.arc(b.x+b.w/2, b.y+b.h/2, 3, 0, Math.PI*2); ctx.fill();
+      } else if (b.target){
+        // pulsing highlighted shaft
+        const pulse = 0.55 + 0.45*Math.sin(Date.now()/180);
+        const base = b.r<=2 ? [120,230,255] : [255,210,100];
+        ctx.fillStyle = `rgba(${base[0]},${base[1]},${base[2]},${pulse})`;
+        ctx.fillRect(b.x, b.y, b.w, b.h);
+        ctx.strokeStyle = '#fff'; ctx.lineWidth=1.5;
+        ctx.strokeRect(b.x+1.5, b.y+1.5, b.w-3, b.h-3);
+      } else {
+        const hues = [ [255,90,90],[255,160,60],[255,220,80],[120,255,120],[90,200,255],[170,130,255],[255,110,200] ];
+        const col = hues[b.r % hues.length];
+        ctx.fillStyle = `rgb(${col[0]+ (b.target?0:0)},${col[1]},${col[2]})`;
+        ctx.fillRect(b.x, b.y, b.w, b.h);
+        ctx.strokeStyle = '#0d1224'; ctx.lineWidth=3;
+        ctx.strokeRect(b.x+1.5, b.y+1.5, b.w-3, b.h-3);
+      }
+    }
+
+    // aim arrow at the shaft (only while target intact)
+    if (state.phase !== 'won' && state.phase !== 'over'){
+      const anyTarget = bricks.some(b => b.target && b.alive);
+      if (anyTarget && state.phase !== 'serve'===false){
+      }
+      // guide arrow near bottom pointing at the shaft column
+      const shaftCenterX = GRID_X0 + (SHAFT_C[0]+0.5)*BRICK_W;
+      ctx.save();
+      ctx.strokeStyle = state.phase==='serve' ? '#ffd75e' : 'rgba(255,215,94,0.7)';
+      ctx.fillStyle = ctx.strokeStyle;
+      ctx.lineWidth = 3; ctx.lineCap='round';
+      const gy = PADDLE_Y - 36;
+      ctx.beginPath(); ctx.moveTo(shaftCenterX, gy+14); ctx.lineTo(shaftCenterX, gy);
+      ctx.stroke();
+      // chevron
+      ctx.beginPath();
+      ctx.moveTo(shaftCenterX-7, gy+2); ctx.lineTo(shaftCenterX, gy-7); ctx.lineTo(shaftCenterX+7, gy+2);
+      ctx.stroke();
+      // label
+      ctx.font = 'bold 12px sans-serif';
+      ctx.textAlign='center';
+      ctx.fillText('AIM HERE', shaftCenterX, gy-12);
+      ctx.restore();
+    }
+
+    // paddle
+    const pg = ctx.createLinearGradient(paddle.x, PADDLE_Y, paddle.x, PADDLE_Y+PADDLE_H);
+    pg.addColorStop(0,'#9fb6ff'); pg.addColorStop(1,'#5f7bff');
+    ctx.fillStyle = pg;
+    roundRect(ctx, paddle.x - paddle.w/2, PADDLE_Y, paddle.w, PADDLE_H, 7);
+    ctx.fill();
+
+    // pickups
+    for (const pk of pickups){
+      ctx.save();
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.font='bold 14px sans-serif';
+      const lab = pk.kind==='S' ? '⚡' : pk.kind==='E' ? '◄►' : '♥';
+      ctx.fillStyle = pk.kind==='S' ? '#ff5dff' : pk.kind==='E' ? '#5dff9a' : '#ff5d7a';
+      ctx.beginPath(); ctx.arc(pk.x, pk.y, 9, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle='#0d1224'; ctx.fillText(lab, pk.x, pk.y+0.5);
+      ctx.restore();
+    }
+
+    // balls
+    for (const b of balls){
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath(); ctx.arc(b.x, b.y, BALL_R, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = '#8ff';
+      ctx.beginPath(); ctx.arc(b.x-2, b.y-2, BALL_R*0.35, 0, Math.PI*2); ctx.fill();
+    }
+
+    // HUD
+    ctx.fillStyle = '#c7d2ff';
+    ctx.font = 'bold 14px sans-serif';
+    ctx.textBaseline='top';
+    ctx.textAlign='left';
+    ctx.fillText('SCORE ' + state.score, 16, 14);
+    ctx.textAlign='center';
+    ctx.fillText('Level ' + state.level, W/2, 14);
+    ctx.textAlign='right';
+    ctx.fillText('❤'.repeat(Math.max(0,state.lives)), W-16, 14);
+
+    // auto-play indicator
+    const auto = autoPlayStreak >= 6;
+    ctx.textAlign='center'; ctx.textBaseline='bottom';
+    ctx.font = auto ? 'bold 15px sans-serif' : '12px sans-serif';
+    ctx.fillStyle = auto ? '#5dff9a' : '#56618a';
+    ctx.fillText(auto ? '✦ AUTO-PLAY — ball self-sustaining above the wall! ✦'
+                      : 'Thread the ball through the glowing shaft', W/2, H-8);
+
+    // serve / phase overlays
+    if (state.phase==='serve'){
+      ctx.fillStyle='rgba(10,14,26,0.45)';
+      ctx.fillRect(0, PADDLE_Y-70, W, 46);
+      ctx.fillStyle='#ffd75e'; ctx.font='bold 15px sans-serif';
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText('CLICK / PRESS SPACE to launch the ball', W/2, PADDLE_Y-46);
+    } else if (state.phase==='won'){
+      ctx.fillStyle='rgba(10,14,26,0.65)'; ctx.fillRect(0,0,W,H);
+      ctx.fillStyle='#5dff9a'; ctx.font='bold 34px sans-serif';
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText('🏆 LEVEL CLEARED!', W/2, H/2-20);
+      ctx.fillStyle='#c7d2ff'; ctx.font='16px sans-serif';
+      ctx.fillText('Click or press Space for the next fortress', W/2, H/2+22);
+    } else if (state.phase==='over'){
+      ctx.fillStyle='rgba(10,14,26,0.7)'; ctx.fillRect(0,0,W,H);
+      ctx.fillStyle='#ff5d7a'; ctx.font='bold 34px sans-serif';
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText('GAME OVER', W/2, H/2-20);
+      ctx.fillStyle='#c7d2ff'; ctx.font='16px sans-serif';
+      ctx.fillText('Click or press Space to retry', W/2, H/2+22);
+    } else if (state.phase==='ready'){
+      ctx.fillStyle='rgba(10,14,26,0.6)'; ctx.fillRect(0,0,W,H);
+      ctx.fillStyle='#9fb6ff'; ctx.font='bold 30px sans-serif';
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText('THE NARROW SHAFT', W/2, H/2-40);
+      ctx.fillStyle='#c7d2ff'; ctx.font='15px sans-serif';
+      const lines = [
+        'A fortress of unbreakable steel towers above you.',
+        'The only way in is the glowing shaft — line up and break through.',
+        'Once the ball is inside, space opens up and it plays itself.',
+        'Catch ⚡ split pickups for chain-reaction multiball clears.',
+      ];
+      lines.forEach((l,i)=> ctx.fillText(l, W/2, H/2-6 + i*22));
+      ctx.fillStyle='#ffd75e'; ctx.font='bold 16px sans-serif';
+      ctx.fillText('CLICK or PRESS SPACE to begin', W/2, H/2 + 96);
+    }
+  }
+
+  function roundRect(c,x,y,w,h,r){
+    ctx.beginPath();
+    ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+    ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+  }
+
+  // ---------- Main loop ----------
+  let last = performance.now();
+  function loop(now){
+    const dt = Math.min(0.05, (now-last)/1000);
+    last = now;
+    if (state.phase==='play' || state.phase==='serve') update(dt);
+    render();
+    requestAnimationFrame(loop);
+  }
+
+  function init(){
+    hintEl.innerHTML =
+      '<b>Aim for the glowing shaft</b> — the only breakable gap in the steel wall. ' +
+      'Once the ball gets up top it self-sustains (auto-play). Grab <span class="badge" style="color:#ff5dff">⚡ split</span> ' +
+      'pickups for multiball chain reactions. Mouse / Arrow keys / touch to move.';
+    buildLevel();
+    state.phase = 'ready';
+    requestAnimationFrame(loop);
+  }
+
+  init();
+
+  // debug/test hook (inert in normal play)
+  window.__game = () => ({
+    phase: state.phase, score: state.score, lives: state.lives, level: state.level,
+    balls: balls.map(b=>({x:Math.round(b.x*10)/10, y:Math.round(b.y*10)/10, stuck:b.stuck})),
+    bricksLeft: bricks.filter(b=>b.alive && !b.steel).length,
+    bricksTotal: state.initialBreakable,
+    autoStreak: autoPlayStreak,
+    pickups: pickups.length
+  });
+  window.__debug = {
+    // teleport a ball up inside the chamber with an upward velocity to observe
+    // the auto-play / cascade / win path (verification only, not reachable in play)
+    putBallInChamber: function(){
+      balls = [ { x: W/2, y: 50, vx: 2.8, vy: 3.2, speed:BALL_SPEED, stuck:false } ];
+      autoPlayStreak = 999;
+      state.phase = 'play';
+    }
+  };
+})();
+</script>
+</body>
+</html>
