@@ -71,11 +71,11 @@
   // wall    = rows of steel below the chamber, EXCEPT the given shaft columns which
   //           are breakable all the way through (the only way in)
   const LEVELS = [
-    { name:'The Narrow Shaft',  chamber:3, wall:3, shafts:[[4,5,6]],            hue:0 },
-    { name:'Thread the Crank',  chamber:3, wall:4, shafts:[[4,5]],              hue:1 },
-    { name:'Off-Center',        chamber:4, wall:3, shafts:[[6,7]],              hue:3 },
-    { name:'Twin Doors',        chamber:3, wall:3, shafts:[[2,3],[8,9]],        hue:5 },
-    { name:'The Deep Chamber',  chamber:5, wall:3, shafts:[[4,5,6]],            hue:2 },
+    { name:'The Slit',        chamber:3, wall:1, shafts:[[5]], hue:0 },   // one-brick gap, dead center
+    { name:'The Crank',       chamber:3, wall:1, shafts:[[7]], hue:1 },   // shifted right
+    { name:'Off-Center',      chamber:4, wall:1, shafts:[[4]], hue:3 },   // left, taller chamber
+    { name:'The Far Slot',    chamber:3, wall:1, shafts:[[8]], hue:5 },   // far right
+    { name:'The Deep Chamber',chamber:5, wall:1, shafts:[[6]], hue:2 },   // tall chamber
   ];
   let cfg = LEVELS[0];
   let autoFloorY = ROW_Y(cfg.chamber);   // top of the steel wall = "auto-play zone" boundary
@@ -486,10 +486,9 @@
       ctx.fillText('Level ' + state.level + ' — ' + cfg.name, W/2, H/2-20);
       ctx.fillStyle='#c7d2ff'; ctx.font='15px sans-serif';
       const lines = [
-        cfg.shafts.length>1
-          ? 'Two glowing doors pierce the steel — get the ball through either.  '
-          : (cfg.shafts[0].length<3 ? 'A thin 2-wide slit in the wall — thread it precisely.'
-                                    : 'The only way in is the glowing shaft — line up and break through.'),
+        'A one-brick-thick steel wall — the only way in is a single glowing slit.',
+        cfg.shafts[0].length<3 ? 'The gap is one brick wide: thread the ball dead-center.'
+                               : 'The shaft is the only opening — line up and break through.',
         'Once the ball is inside, space opens up and it plays itself.',
         'Catch ⚡ split pickups for chain-reaction multiball clears.',
       ];

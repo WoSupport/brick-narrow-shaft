@@ -10,9 +10,11 @@ async function main(){
   const p = await b.newPage();
   await p.setViewport({width:600,height:760});
   const errs=[]; p.on('pageerror',e=>errs.push(e.message));
-  await p.goto(url,{waitUntil:'networkidle0'}); await sleep(300);
+  await p.goto(url,{waitUntil:'networkidle0'}); 
+  await p.waitForFunction(()=>window.__game && window.__debug, {timeout:15000});
+  await sleep(400);
   const g=()=>p.evaluate(()=>window.__game());
-  await p.mouse.click(280,400); await sleep(150); // start -> level 1
+  await p.mouse.click(280,400); await sleep(250); // start -> level 1
   const seen=[];
   for (let i=0;i<12;i++){   // > one full cycle to prove it loops
     const s=await g();
